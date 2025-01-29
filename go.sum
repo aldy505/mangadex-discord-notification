@@ -1,0 +1,4 @@
+github.com/emvi/iso-639-1 v1.1.0 h1:EhZiYVA+ysa/b7+0T2DD9hcX7E/5sh4o1KyDAIPu7VE=
+github.com/emvi/iso-639-1 v1.1.0/go.mod h1:CSA53/Tx0xF9bk2DEA0Mr0wTdIxq7pqoVZgBOfoL5GI=
+github.com/guregu/null/v5 v5.0.0 h1:PRxjqyOekS11W+w/7Vfz6jgJE/BCwELWtgvOJzddimw=
+github.com/guregu/null/v5 v5.0.0/go.mod h1:SjupzNy+sCPtwQTKWhUCqjhVCO69hpsl2QsZrWHjlwU=

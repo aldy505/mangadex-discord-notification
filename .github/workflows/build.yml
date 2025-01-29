@@ -1,0 +1,94 @@
+name: Build
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  trufflehog:
+    name: Trufflehog Secret Scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Secret Scanning
+        uses: trufflesecurity/trufflehog@main
+        with:
+          extra_args: --results=verified,unknown
+
+  check:
+    name: Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: 1.23
+          cache: true
+
+      - name: Build
+        run: go build .
+
+      - name: Test
+        run: go test -v ./...
+
+  build-image:
+    name: Build Image
+    strategy:
+      matrix:
+        arch:
+          - amd64
+          - arm64
+    runs-on: |-
+      ${{fromJson('{
+        "amd64": "ubuntu-24.04",
+        "arm64": "ubuntu-24.04-arm"
+      }')[matrix.arch] }}
+    needs:
+      - check
+      - trufflehog
+    permissions:
+      contents: read
+      packages: write
+    if: github.ref_name == 'master' && github.event_name == 'push'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build Docker image
+        run: |
+          docker buildx build \
+            --platform linux/${{ matrix.arch }} \
+            --tag ghcr.io/aldy505/mangadex-discord-notification:${{ matrix.arch }}-${{ github.sha }} \
+            --push \
+            .
+
+  assemble-image:
+    name: Assemble Image
+    runs-on: ubuntu-latest
+    needs:
+      - build-image
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Docker Login
+        run: docker login --username '${{ github.actor }}' --password '${{ secrets.GITHUB_TOKEN }}' ghcr.io
+
+      - name: Assemble SHA Image
+        run: |
+          docker buildx imagetools create -t "ghcr.io/aldy505/mangadex-discord-notification:${{ github.sha }}" \
+            "ghcr.io/aldy505/mangadex-discord-notification:arm64-${{ github.sha }}" \
+            "ghcr.io/aldy505/mangadex-discord-notification:amd64-${{ github.sha }}"
+
+      - name: Assemble latest Image
+        run: |
+          docker buildx imagetools create -t "ghcr.io/aldy505/mangadex-discord-notification:latest" \
+            "ghcr.io/aldy505/mangadex-discord-notification:arm64-${{ github.sha }}" \
+            "ghcr.io/aldy505/mangadex-discord-notification:amd64-${{ github.sha }}"
