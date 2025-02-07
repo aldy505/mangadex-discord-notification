@@ -137,6 +137,7 @@ func main() {
 			}
 
 			cancel()
+			previousScheduleRun = time.Now()
 			slog.DebugContext(ctx, "Sleeping", slog.Duration("duration", nextScheduleRun.Sub(time.Now())))
 			time.Sleep(nextScheduleRun.Sub(time.Now()))
 		}
