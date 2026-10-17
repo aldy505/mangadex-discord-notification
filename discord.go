@@ -56,7 +56,11 @@ type discordTemplateData struct {
 func DeliverToDiscord(ctx context.Context, webhookURL string, feedItem MangaUpdate, customLogo string) error {
 	// Prepare the webhook object
 	var sb strings.Builder
-	sb.WriteString("**" + feedItem.Title + " | Ch. " + feedItem.Chapter + "**\n")
+	sb.WriteString("**")
+	sb.WriteString(feedItem.Title)
+	sb.WriteString(" | Ch. ")
+	sb.WriteString(feedItem.Chapter)
+	sb.WriteString("**\n")
 	sb.WriteString(feedItem.URL)
 
 	webhookObject := discordWebhookObject{

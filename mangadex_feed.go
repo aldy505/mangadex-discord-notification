@@ -10,7 +10,7 @@ import (
 	"net/url"
 	"time"
 
-	"github.com/guregu/null/v5"
+	"github.com/guregu/null/v6"
 )
 
 type MangadexFeedResponse struct {

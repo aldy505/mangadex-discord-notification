@@ -2,11 +2,14 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
 	"strings"
 	"time"
+
+	"github.com/getsentry/sentry-go"
 )
 
 type MangaUpdate struct {
@@ -62,17 +65,20 @@ func main() {
 		switch logLevelString {
 		case "debug":
 			slog.SetLogLoggerLevel(slog.LevelDebug)
-			break
 		case "info":
 			slog.SetLogLoggerLevel(slog.LevelInfo)
-			break
 		case "warn":
 			slog.SetLogLoggerLevel(slog.LevelWarn)
-			break
 		case "error":
 			slog.SetLogLoggerLevel(slog.LevelError)
-			break
 		}
+	}
+
+	if err := sentry.Init(sentry.ClientOptions{
+		Dsn:        os.Getenv("SENTRY_DSN"),
+		SampleRate: 1.0,
+	}); err != nil {
+		slog.Error("Failed to initialize sentry", slog.String("error", err.Error()))
 	}
 
 	mangadexClient, err := NewMangadexClient("https://api.mangadex.org/", nil)
@@ -89,10 +95,12 @@ func main() {
 			ctx, cancel := context.WithDeadline(context.Background(), nextScheduleRun)
 			slog.DebugContext(ctx, "Running scheduled run", slog.Time("next_schedule_run", nextScheduleRun))
 
-			for _, config := range configs {
+			for i := range configs {
+				config := configs[i]
 				childCtx, childCancel := context.WithTimeout(ctx, time.Minute)
 				feedResponse, err := mangadexClient.GetFeed(childCtx, config.MangaId, config.TranslatedLanguages)
 				if err != nil {
+					sentry.CaptureException(fmt.Errorf("failed to get feed: %w", err))
 					slog.ErrorContext(ctx, "Failed to get feed", slog.String("manga_id", config.MangaId), slog.String("error", err.Error()))
 					childCancel()
 					continue
@@ -115,6 +123,7 @@ func main() {
 				if foundOne {
 					mangaInfo, err := mangadexClient.GetManga(ctx, config.MangaId)
 					if err != nil {
+						sentry.CaptureException(fmt.Errorf("failed to get manga info: %w", err))
 						slog.ErrorContext(ctx, "Failed to get manga info", slog.String("error", err.Error()))
 						childCancel()
 						continue
@@ -129,17 +138,21 @@ func main() {
 					slog.InfoContext(ctx, "Found update", slog.Any("update", update))
 					err = DeliverToDiscord(ctx, webhookUrl, update, "https://image.spreadshirtmedia.net/image-server/v1/compositions/T1599A1PA5076PT10X11Y7D318959464W4338H5200/views/1,width=550,height=550,appearanceId=1,backgroundColor=FFFFFF,noPt=true/laughing-cat-in-manga-kawaii-style-square-fridge-magnet.jpg")
 					if err != nil {
+						sentry.CaptureException(fmt.Errorf("failed to deliver to discord: %w", err))
 						slog.ErrorContext(ctx, "Failed to deliver to discord", slog.String("error", err.Error()))
 						childCancel()
 						continue
 					}
 				}
+
+				// Sleep to prevent rate limiting
+				time.Sleep(time.Duration(i) * time.Second)
 			}
 
 			cancel()
 			previousScheduleRun = time.Now()
-			slog.DebugContext(ctx, "Sleeping", slog.Duration("duration", nextScheduleRun.Sub(time.Now())))
-			time.Sleep(nextScheduleRun.Sub(time.Now()))
+			slog.DebugContext(ctx, "Sleeping", slog.Duration("duration", time.Until(nextScheduleRun)))
+			time.Sleep(time.Until(nextScheduleRun))
 		}
 	}(scheduleRunInterval, configs)
 
