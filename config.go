@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"strings"
 )
 
 type Config struct {
@@ -57,7 +58,7 @@ func NewFromMangaIds(mangaIds []string) ([]Config, error) {
 			continue
 		}
 
-		configs[i].MangaId = mangaIds[i]
+		configs[i].MangaId = strings.TrimSpace(mangaIds[i])
 		configs[i].TranslatedLanguages = []LanguageKey{"en"}
 	}
 
