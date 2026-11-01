@@ -1,0 +1,20 @@
+{
+  "listen_addr": "127.0.0.1:8080",
+  "public_base_url": "https://manga.example.com",
+  "database_path": "/app/data/app.db",
+  "poll_interval": "15m",
+  "session_idle_timeout": "12h",
+  "session_absolute_timeout": "168h",
+  "trust_proxy_headers": true,
+  "webhooks": [
+    {
+      "name": "general",
+      "url": "https://discord.com/api/webhooks/1234567890/xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "default": true
+    },
+    {
+      "name": "manga",
+      "url": "https://discord.com/api/webhooks/0987654321/yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy"
+    }
+  ]
+}
