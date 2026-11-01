@@ -120,3 +120,11 @@ go.work.sum
 
 # Configuration file
 config.json
+# Admin UI build output and dependencies
+web/node_modules/
+web/dist/*
+!web/dist/.gitkeep
+web/.vite/
+
+# Local data
+data/
