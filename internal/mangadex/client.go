@@ -46,7 +46,13 @@ func (c *Client) wait(ctx context.Context) error {
 	c.mu.Lock()
 	now := time.Now()
 	next := c.lastCall.Add(requestInterval)
-	c.lastCall = now
+	// Reserve the slot we are about to wait for, so the next caller also waits
+	// a full interval instead of firing alongside this one.
+	if now.Before(next) {
+		c.lastCall = next
+	} else {
+		c.lastCall = now
+	}
 	c.mu.Unlock()
 
 	if now.Before(next) {
