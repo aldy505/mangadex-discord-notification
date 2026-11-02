@@ -119,12 +119,15 @@ passkey option, with a warning in the logs.
 
 ## Behaviour
 
-- A new subscription's first poll only records a watermark; existing chapters or
-  feed items are not announced. Later polls deliver everything newer than that
-  watermark, oldest first.
+- A new subscription's first poll announces only the newest chapter or feed item
+  as a baseline and records the watermark at its timestamp; older items are not
+  announced. Later polls deliver everything newer than that watermark, oldest
+  first.
 - MangaDex polls walk up to five pages of the chapter feed so a long gap between
-  polls does not lose chapters; a chapter that fails to deliver is skipped and
-  recorded in the subscription's `last_error`.
+  polls does not lose chapters; delivery stops at the first failed item and the
+  watermark only advances past delivered items, so the failed item and everything
+  after it are retried on the next poll, with the failure kept in the
+  subscription's `last_error` until it succeeds.
 - Delivered messages are truncated to Discord's 2000 character limit.
 - Feed URLs are fetched exactly as entered. There is no private-network guard,
   so treat admin accounts as trusted.
