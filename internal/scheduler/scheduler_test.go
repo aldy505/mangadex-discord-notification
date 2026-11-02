@@ -21,23 +21,36 @@ import (
 type recordingWebhook struct {
 	mu       sync.Mutex
 	requests []string
+	status   int
 	server   *httptest.Server
 }
 
 func newRecordingWebhook(t *testing.T) *recordingWebhook {
 	t.Helper()
 
-	hook := &recordingWebhook{}
+	hook := &recordingWebhook{status: http.StatusNoContent}
 	hook.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
+
 		hook.mu.Lock()
+		// Attempts are recorded even when they fail, so tests can count retries.
 		hook.requests = append(hook.requests, string(body))
+		status := hook.status
 		hook.mu.Unlock()
-		w.WriteHeader(http.StatusNoContent)
+
+		w.WriteHeader(status)
 	}))
 	t.Cleanup(hook.server.Close)
 
 	return hook
+}
+
+// respond sets the status code every following delivery attempt answers with.
+func (h *recordingWebhook) respond(status int) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	h.status = status
 }
 
 func (h *recordingWebhook) bodies() []string {
@@ -86,12 +99,14 @@ func newTestManager(t *testing.T, webhookURL string, mangadexBaseURL string) *Ma
 	return NewManager(cfg, st, mangadexClient, nil, discardLogger())
 }
 
-func TestPollFeedSkipsExistingItemsOnFirstRun(t *testing.T) {
+func TestPollFeedFirstRunDeliversNewestItem(t *testing.T) {
 	hook := newRecordingWebhook(t)
 	feedServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprint(w, `<?xml version="1.0"?><rss version="2.0"><channel><title>Feed</title>
 			<item><title>Old</title><link>https://example.com/old</link>
 			<description>old</description><pubDate>Mon, 02 Jan 2023 15:04:05 GMT</pubDate></item>
+			<item><title>New</title><link>https://example.com/new</link>
+			<description>new</description><pubDate>Tue, 03 Jan 2023 15:04:05 GMT</pubDate></item>
 			</channel></rss>`)
 	}))
 	t.Cleanup(feedServer.Close)
@@ -111,11 +126,21 @@ func TestPollFeedSkipsExistingItemsOnFirstRun(t *testing.T) {
 	if err != nil {
 		t.Fatalf("pollFeed: %v", err)
 	}
-	if watermark == nil {
-		t.Fatal("expected the watermark to be initialised")
+
+	bodies := hook.bodies()
+	if len(bodies) != 1 {
+		t.Fatalf("deliveries on the first run = %d, want 1 baseline item: %v", len(bodies), bodies)
 	}
-	if got := hook.bodies(); len(got) != 0 {
-		t.Fatalf("expected no deliveries on the first run, got %d", len(got))
+	if !contains(bodies[0], "New") {
+		t.Errorf("baseline did not announce the newest item: %s", bodies[0])
+	}
+	if contains(bodies[0], "Old") {
+		t.Errorf("baseline announced an older item: %s", bodies[0])
+	}
+
+	newItem := time.Date(2023, 1, 3, 15, 4, 5, 0, time.UTC).UnixMilli()
+	if watermark == nil || *watermark != newItem {
+		t.Fatalf("watermark = %v, want %d", watermark, newItem)
 	}
 }
 
@@ -234,6 +259,219 @@ func TestPollMangaDeliversNewChapters(t *testing.T) {
 
 	if newWatermark == nil || *newWatermark != createdAt.UnixMilli() {
 		t.Fatalf("watermark = %v, want %d", newWatermark, createdAt.UnixMilli())
+	}
+}
+
+func TestPollMangaFirstRunDeliversNewestChapter(t *testing.T) {
+	hook := newRecordingWebhook(t)
+
+	older := time.Date(2024, 5, 1, 12, 0, 0, 0, time.UTC)
+	newer := older.Add(time.Minute)
+
+	// The real API answers newest first.
+	mangaServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"result":"ok","response":"collection","limit":100,"offset":0,"total":2,"data":[
+			{"id":"chapter-2","type":"chapter","attributes":{"chapter":"2","title":"Second",
+			"translatedLanguage":"en","publishAt":%q,"readableAt":%q,"createdAt":%q,"updatedAt":%q,"pages":10,"version":1}},
+			{"id":"chapter-1","type":"chapter","attributes":{"chapter":"1","title":"First",
+			"translatedLanguage":"en","publishAt":%q,"readableAt":%q,"createdAt":%q,"updatedAt":%q,"pages":10,"version":1}}]}`,
+			newer.Format(time.RFC3339Nano), newer.Format(time.RFC3339Nano), newer.Format(time.RFC3339Nano), newer.Format(time.RFC3339Nano),
+			older.Format(time.RFC3339Nano), older.Format(time.RFC3339Nano), older.Format(time.RFC3339Nano), older.Format(time.RFC3339Nano))
+	}))
+	t.Cleanup(mangaServer.Close)
+
+	manager := newTestManager(t, hook.server.URL, mangaServer.URL)
+	subscription := &store.Subscription{
+		ID:              "sub-1",
+		Kind:            store.KindMangadex,
+		Label:           "One Piece",
+		Source:          "manga-id",
+		Webhook:         "main",
+		Languages:       "en",
+		IntervalSeconds: 60,
+		Enabled:         true,
+	}
+
+	watermark, err := manager.pollManga(context.Background(), subscription, discardLogger())
+	if err != nil {
+		t.Fatalf("pollManga: %v", err)
+	}
+
+	bodies := hook.bodies()
+	if len(bodies) != 1 {
+		t.Fatalf("deliveries on the first run = %d, want 1 baseline chapter: %v", len(bodies), bodies)
+	}
+	if !contains(bodies[0], "https://mangadex.org/chapter/chapter-2") {
+		t.Errorf("baseline did not announce the newest chapter: %s", bodies[0])
+	}
+	if contains(bodies[0], "chapter-1") {
+		t.Errorf("baseline announced an older chapter: %s", bodies[0])
+	}
+
+	if watermark == nil || *watermark != newer.UnixMilli() {
+		t.Fatalf("watermark = %v, want %d", watermark, newer.UnixMilli())
+	}
+}
+
+func TestPollMangaStopsAtFirstFailureAndRetries(t *testing.T) {
+	hook := newRecordingWebhook(t)
+
+	t1 := time.Date(2024, 5, 1, 12, 0, 0, 0, time.UTC)
+	t2 := t1.Add(time.Minute)
+
+	// The real API answers newest first.
+	mangaServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"result":"ok","response":"collection","limit":100,"offset":0,"total":2,"data":[
+			{"id":"chapter-2","type":"chapter","attributes":{"chapter":"2","title":"Second",
+			"translatedLanguage":"en","publishAt":%q,"readableAt":%q,"createdAt":%q,"updatedAt":%q,"pages":10,"version":1}},
+			{"id":"chapter-1","type":"chapter","attributes":{"chapter":"1","title":"First",
+			"translatedLanguage":"en","publishAt":%q,"readableAt":%q,"createdAt":%q,"updatedAt":%q,"pages":10,"version":1}}]}`,
+			t2.Format(time.RFC3339Nano), t2.Format(time.RFC3339Nano), t2.Format(time.RFC3339Nano), t2.Format(time.RFC3339Nano),
+			t1.Format(time.RFC3339Nano), t1.Format(time.RFC3339Nano), t1.Format(time.RFC3339Nano), t1.Format(time.RFC3339Nano))
+	}))
+	t.Cleanup(mangaServer.Close)
+
+	manager := newTestManager(t, hook.server.URL, mangaServer.URL)
+
+	watermark := t1.Add(-time.Hour).UnixMilli()
+	subscription := &store.Subscription{
+		ID:              "sub-1",
+		Kind:            store.KindMangadex,
+		Label:           "One Piece",
+		Source:          "manga-id",
+		Webhook:         "main",
+		Languages:       "en",
+		IntervalSeconds: 60,
+		Enabled:         true,
+		Watermark:       &watermark,
+	}
+
+	hook.respond(http.StatusInternalServerError)
+
+	failed, err := manager.pollManga(context.Background(), subscription, discardLogger())
+	if err == nil || !contains(err.Error(), "deliver chapter chapter-1") {
+		t.Fatalf("pollManga error = %v, want it to name chapter-1", err)
+	}
+	if failed == nil || *failed != watermark {
+		t.Fatalf("watermark after failure = %v, want it unchanged at %d", failed, watermark)
+	}
+	if got := len(hook.bodies()); got != 1 {
+		t.Fatalf("delivery attempts after failure = %d, want 1", got)
+	}
+
+	hook.respond(http.StatusNoContent)
+
+	recovered, err := manager.pollManga(context.Background(), subscription, discardLogger())
+	if err != nil {
+		t.Fatalf("pollManga retry: %v", err)
+	}
+
+	bodies := hook.bodies()
+	if len(bodies) != 3 {
+		t.Fatalf("delivery attempts after retry = %d, want 3: %v", len(bodies), bodies)
+	}
+	if !contains(bodies[1], "https://mangadex.org/chapter/chapter-1") {
+		t.Errorf("failed chapter was not retried: %s", bodies[1])
+	}
+	if !contains(bodies[2], "https://mangadex.org/chapter/chapter-2") {
+		t.Errorf("later chapter was not delivered: %s", bodies[2])
+	}
+	if recovered == nil || *recovered != t2.UnixMilli() {
+		t.Fatalf("watermark after retry = %v, want %d", recovered, t2.UnixMilli())
+	}
+
+	// poll() persists the returned watermark before the next run reloads it.
+	subscription.Watermark = recovered
+
+	again, err := manager.pollManga(context.Background(), subscription, discardLogger())
+	if err != nil {
+		t.Fatalf("pollManga after catch-up: %v", err)
+	}
+	if again != nil {
+		t.Errorf("watermark after catch-up = %d, want it untouched", *again)
+	}
+	if got := len(hook.bodies()); got != 3 {
+		t.Fatalf("delivered %d duplicates on a settled feed", got-3)
+	}
+}
+
+func TestPollFeedStopsAtFirstFailureAndRetries(t *testing.T) {
+	hook := newRecordingWebhook(t)
+	feedServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `<?xml version="1.0"?><rss version="2.0"><channel><title>Feed</title>
+			<item><title>Old</title><link>https://example.com/old</link>
+			<description>old</description><pubDate>Mon, 02 Jan 2023 15:04:05 GMT</pubDate></item>
+			<item><title>New</title><link>https://example.com/new</link>
+			<description>new</description><pubDate>Tue, 03 Jan 2023 15:04:05 GMT</pubDate></item>
+			</channel></rss>`)
+	}))
+	t.Cleanup(feedServer.Close)
+
+	manager := newTestManager(t, hook.server.URL, "")
+
+	oldItem := time.Date(2023, 1, 2, 15, 4, 5, 0, time.UTC)
+	newItem := time.Date(2023, 1, 3, 15, 4, 5, 0, time.UTC)
+
+	watermark := oldItem.Add(-time.Hour).UnixMilli()
+	subscription := &store.Subscription{
+		ID:              "sub-1",
+		Kind:            store.KindRSS,
+		Label:           "Feed",
+		Source:          feedServer.URL,
+		Webhook:         "main",
+		IntervalSeconds: 60,
+		Enabled:         true,
+		Watermark:       &watermark,
+	}
+
+	hook.respond(http.StatusInternalServerError)
+
+	failed, err := manager.pollFeed(context.Background(), subscription, discardLogger())
+	if err == nil || !contains(err.Error(), `deliver feed item "Old"`) {
+		t.Fatalf("pollFeed error = %v, want it to name Old", err)
+	}
+	if failed == nil || *failed != watermark {
+		t.Fatalf("watermark after failure = %v, want it unchanged at %d", failed, watermark)
+	}
+	if got := len(hook.bodies()); got != 1 {
+		t.Fatalf("delivery attempts after failure = %d, want 1", got)
+	}
+
+	hook.respond(http.StatusNoContent)
+
+	recovered, err := manager.pollFeed(context.Background(), subscription, discardLogger())
+	if err != nil {
+		t.Fatalf("pollFeed retry: %v", err)
+	}
+
+	bodies := hook.bodies()
+	if len(bodies) != 3 {
+		t.Fatalf("delivery attempts after retry = %d, want 3: %v", len(bodies), bodies)
+	}
+	if !contains(bodies[1], "Old") {
+		t.Errorf("failed item was not retried: %s", bodies[1])
+	}
+	if !contains(bodies[2], "New") {
+		t.Errorf("later item was not delivered: %s", bodies[2])
+	}
+	if recovered == nil || *recovered != newItem.UnixMilli() {
+		t.Fatalf("watermark after retry = %v, want %d", recovered, newItem.UnixMilli())
+	}
+
+	// poll() persists the returned watermark before the next run reloads it.
+	subscription.Watermark = recovered
+
+	again, err := manager.pollFeed(context.Background(), subscription, discardLogger())
+	if err != nil {
+		t.Fatalf("pollFeed after catch-up: %v", err)
+	}
+	if again != nil {
+		t.Errorf("watermark after catch-up = %d, want it untouched", *again)
+	}
+	if got := len(hook.bodies()); got != 3 {
+		t.Fatalf("delivered %d duplicates on a settled feed", got-3)
 	}
 }
 
